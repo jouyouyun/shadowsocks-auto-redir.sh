@@ -12,6 +12,7 @@ do_iptables() {
     if [ "$DEBUG" == "1" ]; then
         echo "iptables $@"
     else
+        echo "iptables $@"
         iptables $@
     fi
 }
@@ -32,8 +33,14 @@ do_ss_redir() {
 clear_rules() {
     echo "Clearing rules"
     do_iptables -t nat -D OUTPUT -p tcp -j SHADOWSOCKS
+	do_iptables -t mangle -D PREROUTING -j SHADOWSOCKS
     do_iptables -t nat -F SHADOWSOCKS
     do_iptables -t nat -X SHADOWSOCKS
+    do_iptables -t mangle -F SHADOWSOCKS
+    do_iptables -t mangle -X SHADOWSOCKS
+	echo "Clearing route"
+	ip route del local default dev lo table 100
+	ip rule del fwmark 1 lookup 100
     do_ipset destroy shadowsocks
 
     if [[ "$IPV6" == "true" ]]; then
@@ -71,7 +78,12 @@ elif [ ! -f "$CONFIG_PATH" ]; then
     exit 1
 fi
 
+UDP_ENABLED=`jq -r ".enable_udp" $CONFIG_PATH`
+
 do_iptables -t nat -N SHADOWSOCKS
+if [[ $UDP_ENABLED == "true" ]]; then
+	do_iptables -t mangle -N SHADOWSOCKS
+fi
 
 # Bypass users
 BYPASS_USERS=`jq -r ".ss_redir_options.bypass_users" $CONFIG_PATH`
@@ -129,8 +141,19 @@ do_iptables -t nat -A SHADOWSOCKS -p tcp -m set --match-set shadowsocks dst -j R
 LOCAL_PORT=`jq -r ".local_port" $CONFIG_PATH`
 
 do_iptables -t nat -A SHADOWSOCKS -p tcp -j REDIRECT --to-port $LOCAL_PORT
+
+# Add udp rules
+if [[ $UDP_ENABLED == "true" ]]; then
+	ip route add local default dev lo table 100
+	ip rule add fwmark 1 lookup 100
+	do_iptables -t mangle -A SHADOWSOCKS -p udp --dport 53 -j TPROXY --on-port $LOCAL_PORT --tproxy-mark 0x01/0x01
+fi
+
+# Apply rules
 do_iptables -t nat -A OUTPUT -p tcp -j SHADOWSOCKS
-# TODO: Support UDP as an extension in .ss_redir_options
+if [[ $UDP_ENABLED == "true" ]]; then
+	do_iptables -t mangle -A PREROUTING -j SHADOWSOCKS
+fi
 
 # IPv6 redirect to IPv4 Shadowsocks
 # Please set local_address to ::
@@ -152,6 +175,9 @@ if [[ `jq -r ".ss_redir_options.ota" $CONFIG_PATH` == "true" ]]; then
     SS_PARAMS="-A $SS_PARAMS"
 fi
 
+if [[ $UDP_ENABLED == "true" ]]; then
+    SS_PARAMS="-u $SS_PARAMS"
+fi
 do_ss_redir $SS_PARAMS
 
 # ss-redir has exited.
