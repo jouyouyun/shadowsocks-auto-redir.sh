@@ -1,18 +1,10 @@
 #!/bin/bash
-echoerr() { echo "$@" 1>&2; }
-do_ip6tables() {
-    if [ "$DEBUG" == "1" ]; then
-        echo "ip6tables $@"
-    else
-        ip6tables $@
-    fi
 
-}
+echoerr() { echo "$@" 1>&2; }
 do_iptables() {
     if [ "$DEBUG" == "1" ]; then
         echo "iptables $@"
     else
-        echo "iptables $@"
         iptables $@
     fi
 }
@@ -33,25 +25,9 @@ do_ss_redir() {
 clear_rules() {
     echo "Clearing rules"
     do_iptables -t nat -D OUTPUT -p tcp -j SHADOWSOCKS
-    do_iptables -t mangle -D PREROUTING -j SHADOWSOCKS
     do_iptables -t nat -F SHADOWSOCKS
     do_iptables -t nat -X SHADOWSOCKS
-    do_iptables -t mangle -F SHADOWSOCKS
-    do_iptables -t mangle -X SHADOWSOCKS
-    echo "Clearing route"
-    ip route del local default dev lo table 100
-    ip rule del fwmark 1 lookup 100
-    do_ipset destroy shadowsocks
-
-    if [[ "$IPV6" == "true" ]]; then
-        do_iptables -D INPUT -p tcp --dport $LOCAL_PORT -j DROP
-        do_iptables -D INPUT -p tcp --dport $LOCAL_PORT -i lo -j ACCEPT
-        do_ip6tables -D INPUT -p tcp --dport $LOCAL_PORT -j DROP
-        do_ip6tables -D INPUT -p tcp --dport $LOCAL_PORT -i lo -j ACCEPT
-        do_ip6tables -t nat -D OUTPUT -p tcp -o lo -j RETURN
-        do_ip6tables -t nat -D OUTPUT -p tcp -j REDIRECT --to-port $LOCAL_PORT
-    fi
-
+    do_ipset destroy chinaip
 }
 find_script_path() {
     SCRIPT_PATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -78,22 +54,7 @@ elif [ ! -f "$CONFIG_PATH" ]; then
     exit 1
 fi
 
-UDP_ENABLED=`jq -r ".enable_udp" $CONFIG_PATH`
-
 do_iptables -t nat -N SHADOWSOCKS
-if [[ $UDP_ENABLED == "true" ]]; then
-    do_iptables -t mangle -N SHADOWSOCKS
-fi
-
-# Bypass users
-BYPASS_USERS=`jq -r ".ss_redir_options.bypass_users" $CONFIG_PATH`
-if [[ "$BYPASS_USERS" != "null" ]]; then
-    BYPASS_USERS=`jq -r ".ss_redir_options.bypass_users[]" $CONFIG_PATH`
-    for user in $BYPASS_USERS; do
-        do_iptables -t nat -A SHADOWSOCKS -m owner --uid-owner $user -j RETURN
-        #do_ip6tables -t nat -A OUTPUT -m owner --uid-owner $user -j RETURN
-    done
-fi
 
 # Bypass ips
 SERVER=`jq -r ".server" $CONFIG_PATH`
@@ -125,48 +86,25 @@ do_iptables -t nat -A SHADOWSOCKS -d 224.0.0.0/4 -j RETURN
 do_iptables -t nat -A SHADOWSOCKS -d 240.0.0.0/4 -j RETURN
 
 # Load bypass route set
-do_ipset -N shadowsocks hash:net maxelem 65536
+do_ipset -N chinaip hash:net
 
 BYPASS_PRESET=`jq -r ".ss_redir_options.bypass_preset" $CONFIG_PATH`
 
 if [[ "$BYPASS_PRESET" == "chnroute" ]]; then
     for ip in `cat $SCRIPT_PATH/routes/chnroute.txt`; do
-        do_ipset add shadowsocks $ip
+        do_ipset add chinaip $ip
     done
 fi
 
-do_iptables -t nat -A SHADOWSOCKS -p tcp -m set --match-set shadowsocks dst -j RETURN
+do_iptables -t nat -A SHADOWSOCKS -p tcp -m set --match-set chinaip dst -j RETURN
 
 # Redirect to ss-redir port
 LOCAL_PORT=`jq -r ".local_port" $CONFIG_PATH`
 
 do_iptables -t nat -A SHADOWSOCKS -p tcp -j REDIRECT --to-port $LOCAL_PORT
 
-# Add udp rules
-if [[ $UDP_ENABLED == "true" ]]; then
-    ip route add local default dev lo table 100
-    ip rule add fwmark 1 lookup 100
-    do_iptables -t mangle -A SHADOWSOCKS -p udp --dport 53 -j TPROXY --on-port $LOCAL_PORT --tproxy-mark 0x01/0x01
-fi
-
 # Apply rules
 do_iptables -t nat -A OUTPUT -p tcp -j SHADOWSOCKS
-if [[ $UDP_ENABLED == "true" ]]; then
-    do_iptables -t mangle -A PREROUTING -j SHADOWSOCKS
-fi
-
-# IPv6 redirect to IPv4 Shadowsocks
-# Please set local_address to ::
-IPV6=`jq -r ".ss_redir_options.ipv6_to_ipv4" $CONFIG_PATH`
-
-if [[ "$IPV6" == "true" ]]; then
-    do_iptables -I INPUT -p tcp --dport $LOCAL_PORT -j DROP
-    do_iptables -I INPUT -p tcp --dport $LOCAL_PORT -i lo -j ACCEPT
-    do_ip6tables -I INPUT -p tcp --dport $LOCAL_PORT -j DROP
-    do_ip6tables -I INPUT -p tcp --dport $LOCAL_PORT -i lo -j ACCEPT
-    do_ip6tables -t nat -I OUTPUT -p tcp -o lo -j RETURN
-    do_ip6tables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port $LOCAL_PORT
-fi
 
 # Build ss-redir params
 SS_PARAMS="-c $CONFIG_PATH"
